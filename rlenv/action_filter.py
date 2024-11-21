@@ -13,9 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-'''
-Migrated from https://github.com/erwincoumans/motion_imitation
-'''
+# Migrated from https://github.com/erwincoumans/motion_imitation
 
 """Two types of filters which can be applied to policy output sequences.
 1. Simple exponential filter
