@@ -111,5 +111,3 @@ logs/*
 ckpts/*
 !*/versatile_walking
 *.npy
-*.png 
-*.pdf 
