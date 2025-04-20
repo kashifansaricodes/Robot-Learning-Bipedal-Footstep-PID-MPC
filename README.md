@@ -5,7 +5,8 @@ This README outlines all the steps taken to set up and run the project with MuJo
 
 ---
 
-file:///home/kashif/Pictures/Screenshots/Screenshot%20from%202025-04-20%2018-27-04.png
+![Cassie Demo](images/cassie_standing_demo.png)
+
 
 ---
 
