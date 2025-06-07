@@ -9,7 +9,8 @@ setup(
         "tensorflow==1.15",
         "kinpy",
         "protobuf==3.20.*",
-        "mpi4py"
+        "mpi4py",
+        "casadi>=3.5.0"
     ],
     author="Zhongyu Li",
     author_email="zhongyu_li@berkeley.edu",

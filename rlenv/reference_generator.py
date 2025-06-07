@@ -175,3 +175,42 @@ class ReferenceGenerator:
     @property
     def in_stand_mode(self):
         return self.start_standing
+
+    def get_ref_motion_trajectory(self, horizon, dt):
+        """
+        Generate a reference motion trajectory for MPC.
+        
+        Args:
+            horizon: Number of time steps in the trajectory
+            dt: Time step duration
+            
+        Returns:
+            Dictionary containing reference trajectory
+        """
+        trajectory = []
+        
+        # Get current time
+        current_time = self.time_in_sec
+        
+        for i in range(horizon + 1):
+            # Calculate future time
+            future_time = current_time + i * dt
+            
+            # Store current gait parameters and time
+            temp_gait_params = self.cmd_generator.curr_ref_gaitparams.copy()
+            temp_rot_params = self.cmd_generator.curr_ref_rotcmds.copy()
+            temp_time = self.time_in_sec
+            
+            # Temporarily set time to future time
+            self.time_in_sec = future_time
+            
+            # Get reference motion at this future time
+            ref_dict = self.get_ref_motion(look_forward=0)
+            
+            # Add to trajectory
+            trajectory.append(ref_dict)
+            
+            # Restore original parameters and time
+            self.time_in_sec = temp_time
+        
+        return trajectory

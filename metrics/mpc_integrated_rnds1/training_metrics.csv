@@ -1,0 +1,2 @@
+iteration,timesteps,episodes,mean_reward,std_reward,min_reward,max_reward,mean_ep_length,policy_loss,value_loss,fps,current_mpc_weight,elapsed_time
+10,20359,1604,13.393904198207089,2.9966747549444595,5.424574165680271,22.351010118905474,26.74,0.0,0.0,23,0.24131726324558259,875.6971309185028

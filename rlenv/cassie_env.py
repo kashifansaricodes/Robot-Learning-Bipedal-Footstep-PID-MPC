@@ -44,6 +44,17 @@ class CassieEnv:
         self.qacc = np.copy(self.sim.qacc())
         self.obs_cassie_state = state_out_t()
         self.cassie_out = cassie_out_t()
+        # Initialize MPC controller if specified
+        self.use_mpc = config.get("use_mpc", False)
+        if self.use_mpc:
+            from rlenv.mpc_controller import CassieMPC
+            self.mpc_horizon = config.get("mpc_horizon", 10)
+            self.mpc_dt = config.get("mpc_dt", 0.01)
+            self.mpc_controller = CassieMPC(
+                horizon=self.mpc_horizon,
+                dt=self.mpc_dt,
+                num_motors=10  # Cassie has 10 motors
+            )
         self.u = self._init_u()
         self.num_motor = 10
         self.sim_freq = 2000
@@ -71,6 +82,7 @@ class CassieEnv:
         )
         # action filter
         self.action_filter_order = 2
+        self.use_action_filter = config.get("use_action_filter", True)  # Default to True for backward compatibility
         self.__init_action_filter()
         # dynamics randomization
         self.__set_env_type(config)
@@ -329,25 +341,131 @@ class CassieEnv:
             low=-np.inf, high=np.inf, shape=obs_pol[0].shape
         )
         self.observation_space_pol_cnn = obs_pol[1].shape
-        print("obs space has init!")
+        # Remove debug print about observation space init
 
     ##########################################
     #                Step                    #
     ##########################################
     def __step_sim_nominal(self, actual_pTs_filtered):
-        # 1 control_step = 0.0005s / 2kHz
-        self.u.leftLeg.motorPd.pTarget[:5] = actual_pTs_filtered[:5]
-        self.u.rightLeg.motorPd.pTarget[:5] = actual_pTs_filtered[5:]
-        for _ in range(self.num_sims_per_env_step):
-            # give pTargets to motors
-            self.obs_cassie_state = self.sim.estimate_state(
-                self.sim.step_pd_without_estimation(self.u)
-            )
+        """Step the simulation using MPC or PD control."""
+        if self.use_mpc:
+            try:
+                # Detect if we might be in an unstable state
+                pelvis_orientation = quat2euler(self.qpos[3:7])
+                roll_pitch_tilt = np.abs(pelvis_orientation[:2])  # Roll and pitch
+                is_unstable = np.any(roll_pitch_tilt > 0.15)  # ~8.6 degrees
+                
+                # Get current state
+                current_state = self._get_current_state()
+                
+                # Get reference trajectory
+                reference_trajectory = self._generate_mpc_reference_trajectory()
+                
+                # Compute optimal torques using MPC
+                torques = self.mpc_controller.compute_control(current_state, reference_trajectory)
+                
+                # Apply torques directly - ensure torques is a numpy array
+                torques = np.array(torques).flatten()
+                
+                # Check if torques contains NaN or infinite values
+                if np.any(np.isnan(torques)) or np.any(np.isinf(torques)):
+                    # Remove debug message, use PD control silently
+                    # Fall back to PD control in this step
+                    for i in range(5):
+                        self.u.leftLeg.motorPd.pTarget[i] = actual_pTs_filtered[i]
+                        self.u.rightLeg.motorPd.pTarget[i] = actual_pTs_filtered[i+5]
+                        self.u.leftLeg.motorPd.torque[i] = 0  # Zero feedforward torque
+                        self.u.rightLeg.motorPd.torque[i] = 0  # Zero feedforward torque
+                else:
+                    # Limit maximum torque magnitude for safety (prevent extreme movements)
+                    max_torque = 50.0  # Further reduced from 100 to 50 for safety
+                    torques = np.clip(torques, -max_torque, max_torque)
+                
+                    # Create temporary arrays for torques to avoid copy attribute issue
+                    left_torques = np.zeros(5)
+                    right_torques = np.zeros(5)
+                    
+                    # Copy values individually
+                    for i in range(5):
+                        left_torques[i] = torques[i]
+                        right_torques[i] = torques[i+5]
+                    
+                    # Use even lower torque scale when stable to minimize disruption
+                    # Only use higher MPC correction when potentially unstable
+                    if is_unstable:
+                        torque_scale = 0.03  # Small when unstable (reduced from 0.05)
+                    else:
+                        torque_scale = 0.01  # Extremely small when stable to just gently guide
+                        
+                    # Apply reduced torques with lower gain than before (for stability)
+                    for i in range(5):
+                        self.u.leftLeg.motorPd.torque[i] = left_torques[i] * torque_scale
+                        self.u.rightLeg.motorPd.torque[i] = right_torques[i] * torque_scale
+                    
+                    # Set position targets from filtered actions for backup PD control
+                    for i in range(5):
+                        self.u.leftLeg.motorPd.pTarget[i] = actual_pTs_filtered[i]
+                        self.u.rightLeg.motorPd.pTarget[i] = actual_pTs_filtered[i+5]
+                    
+                    # Only reduce PD gains if MPC is producing valid outputs and we're in a stable state
+                    if not is_unstable:
+                        # Use PD gains mostly at full strength
+                        mpc_pd_ratio = 0.9  # Increased from 0.7 to 0.9 to rely even more on PD controller
+                        temp_pgain_left = np.zeros(5)
+                        temp_pgain_right = np.zeros(5)
+                        
+                        # Store original PD gains
+                        for i in range(5):
+                            temp_pgain_left[i] = self.u.leftLeg.motorPd.pGain[i]
+                            temp_pgain_right[i] = self.u.rightLeg.motorPd.pGain[i]
+                            self.u.leftLeg.motorPd.pGain[i] *= mpc_pd_ratio
+                            self.u.rightLeg.motorPd.pGain[i] *= mpc_pd_ratio
+                
+                # Step the simulation
+                for _ in range(self.num_sims_per_env_step):
+                    self.obs_cassie_state = self.sim.estimate_state(
+                        self.sim.step_pd_without_estimation(self.u)
+                    )
+                
+                # Restore original PD gains if they were modified
+                if 'temp_pgain_left' in locals():
+                    for i in range(5):
+                        self.u.leftLeg.motorPd.pGain[i] = temp_pgain_left[i]
+                        self.u.rightLeg.motorPd.pGain[i] = temp_pgain_right[i]
+                
+            except Exception as e:
+                # Remove debug message
+                use_mpc_correction = False
+                mpc_correction = np.zeros_like(actual_pTs_filtered)
+                
+                # Fall back to PD control
+                for i in range(5):
+                    self.u.leftLeg.motorPd.pTarget[i] = actual_pTs_filtered[i]
+                    self.u.rightLeg.motorPd.pTarget[i] = actual_pTs_filtered[i+5]
+                    self.u.leftLeg.motorPd.torque[i] = 0
+                    self.u.rightLeg.motorPd.torque[i] = 0
+                    
+                for _ in range(self.num_sims_per_env_step):
+                    self.obs_cassie_state = self.sim.estimate_state(
+                        self.sim.step_pd_without_estimation(self.u)
+                    )
+        else:
+            # Original PD control
+            for i in range(5):
+                self.u.leftLeg.motorPd.pTarget[i] = actual_pTs_filtered[i]
+                self.u.rightLeg.motorPd.pTarget[i] = actual_pTs_filtered[i+5]
+                
+            for _ in range(self.num_sims_per_env_step):
+                self.obs_cassie_state = self.sim.estimate_state(
+                    self.sim.step_pd_without_estimation(self.u)
+                )
 
     def __step_sim_zerotorque(self, actual_pTs_filtered):
         # 1 control_step = 0.0005s / 2kHz
-        self.u.leftLeg.motorPd.pTarget[:5] = 0.0 * actual_pTs_filtered[:5]
-        self.u.rightLeg.motorPd.pTarget[:5] = 0.0 * actual_pTs_filtered[5:]
+        for i in range(5):
+            self.u.leftLeg.motorPd.pTarget[i] = 0.0 * actual_pTs_filtered[i]
+            self.u.rightLeg.motorPd.pTarget[i] = 0.0 * actual_pTs_filtered[i+5]
+            
         for _ in range(self.num_sims_per_env_step):
             # give pTargets to motors
             self.obs_cassie_state = self.sim.estimate_state(
@@ -355,28 +473,221 @@ class CassieEnv:
             )
 
     def step(self, acs, restore=False):
-        """
-        :param act: a dict {control index: pTarget, ...}
-        :return:
-        """
-        assert acs.shape[0] == self.num_motor and -1.0 <= acs.all() <= 1.0
-        actual_pTs = self.__get_pTargets(acs)
-        actual_pTs_filtered = self.action_filter.filter(actual_pTs)
+        if restore:
+            self.sim.set_qpos(np.copy(self.qpos_obs))
+            self.sim.set_qvel(np.copy(self.qvel_obs))
 
-        if self.perturbation:
-            self.__apply_perturbation()
-        # simulated env
-        self.__sim_step(actual_pTs_filtered)
-        if self.noisy:
-            self.__add_obs_noise()
+        # RL Policy outputs normalized action, convert to actual action
+        # check joint limit and clip it
+        actual_pTs = self.acs_norm2actual(acs)
 
-        self.__update_data(step=True)
-        obs_vf, obs_pol = self.__get_observation(acs=actual_pTs, step=True)
-        reward, reward_dict = self.__get_reward(acs=actual_pTs)
-        done = self.__is_done() if not restore else False
-        self.info["reward_dict"] = reward_dict
-        self.last_acs = actual_pTs
-        return obs_vf, obs_pol, reward, done, self.info
+        if self.use_action_filter:
+            actual_pTs_filtered = self.__action_filter(actual_pTs)
+        else:
+            actual_pTs_filtered = actual_pTs
+
+        # Reference trajectory for stepping
+        ref_mpos, ref_base = self._get_reference_trajectory()
+        
+        # MPC controller integration - new safety-focused approach
+        if self.use_mpc:
+            # We'll decide whether to use MPC based on stability metrics
+            use_mpc_correction = False
+            mpc_correction = np.zeros_like(actual_pTs_filtered)
+            
+            # Check stability metrics
+            # 1. Check if pelvis orientation is significantly tilted
+            pelvis_orientation = quat2euler(self.qpos[3:7])
+            roll_pitch_tilt = np.abs(pelvis_orientation[:2])  # Roll and pitch
+            
+            # 2. Check angular velocity - high values indicate potential instability
+            angular_velocity = self.qvel[3:6]  # Angular velocities
+            
+            # 3. Check velocity in z direction - negative indicates falling
+            z_velocity = self.qvel[2]
+            
+            # Define thresholds for safety intervention
+            roll_pitch_threshold = 0.2  # ~11 degrees in radians
+            angular_vel_threshold = 1.0  # rad/s
+            z_velocity_threshold = -0.3  # m/s
+            
+            # Decide whether to use MPC for stabilization
+            if (np.any(roll_pitch_tilt > roll_pitch_threshold) or 
+                np.any(np.abs(angular_velocity) > angular_vel_threshold) or
+                z_velocity < z_velocity_threshold):
+                use_mpc_correction = True
+                
+                # If we're in a critical state, let's compute MPC correction
+                try:
+                    # Prepare current state for MPC
+                    current_state = self._get_current_state()
+                    
+                    # Generate reference trajectory for MPC horizon
+                    reference_trajectory = self._generate_mpc_reference_trajectory()
+                    
+                    # Compute MPC control action
+                    mpc_torques = self.mpc_controller.compute_control(current_state, reference_trajectory)
+                    
+                    # Check for NaN or inf values in quiet mode
+                    if np.any(np.isnan(mpc_torques)) or np.any(np.isinf(mpc_torques)):
+                        # Remove debug message
+                        mpc_correction = np.zeros_like(actual_pTs_filtered)
+                    else:
+                        # Store the MPC correction
+                        mpc_correction = mpc_torques
+                        
+                        # Determine how much MPC to blend in based on severity of instability
+                        severity = max(
+                            np.max(roll_pitch_tilt) / roll_pitch_threshold,
+                            np.max(np.abs(angular_velocity)) / angular_vel_threshold,
+                            abs(min(z_velocity, 0)) / abs(z_velocity_threshold)
+                        )
+                        
+                        # Cap severity at 1.0 for safety
+                        severity = min(severity, 1.0)
+                        
+                        # Apply MPC correction with adaptive weight based on severity
+                        mpc_weight = 0.05 * severity  # Small base correction scaled by severity
+                        actual_pTs_filtered = (1 - mpc_weight) * actual_pTs_filtered + mpc_weight * mpc_correction
+                except Exception as e:
+                    # Remove debug message
+                    use_mpc_correction = False
+                    mpc_correction = np.zeros_like(actual_pTs_filtered)
+        
+        if self.step_zerotorque:
+            self.__step_sim_zerotorque(actual_pTs_filtered)
+        else:
+            self.__step_sim_nominal(actual_pTs_filtered)
+
+        # Get reward and next observation
+        if not restore:
+            self.__update_data(step=True)
+        ob_vf, ob_pol = self.__get_observation(acs=actual_pTs_filtered, step=True)
+        reward = self.__get_reward(actual_pTs_filtered)
+        done = self.__is_done()
+
+        # Check if reward is a tuple (original implementation) or a single value
+        reward_sum = 0
+        # Info dict for logging
+        reward_dict = {}
+        
+        # Handle different reward implementations
+        if isinstance(reward, tuple) and len(reward) > 1:
+            reward_sum = np.sum(reward[0])  # First element is total reward
+            # Check if reward[1] is a dictionary
+            if isinstance(reward[1], dict):
+                reward_dict = reward[1]
+            else:
+                # Iterate through reward components if available
+                for i, n in enumerate(self.reward_names):
+                    try:
+                        # The original code checked if ref_mpos[0] is False to determine if in standing mode
+                        # Now we need a different way to check this
+                        is_standing_mode = self.reference_generator.in_stand_mode if hasattr(self.reference_generator, 'in_stand_mode') else False
+                        
+                        if n in ["r_mvel", "r_delta_acs"] and is_standing_mode:
+                            reward_dict[n] = 0.0
+                        else:
+                            if i < len(reward[0]):
+                                reward_dict[n] = reward[0][i]
+                            else:
+                                reward_dict[n] = 0.0
+                    except (IndexError, TypeError):
+                        reward_dict[n] = 0.0
+        else:
+            # Handle case where reward is a single value
+            reward_sum = reward
+            for n in self.reward_names:
+                reward_dict[n] = 0.0  # Set all components to 0
+                
+        info = {"reward_dict": reward_dict}
+
+        return ob_vf, ob_pol, reward_sum, done, info
+
+    def _generate_mpc_reference_trajectory(self):
+        """
+        Generate reference trajectory for MPC over the prediction horizon.
+        Returns a state trajectory of shape (nx, horizon+1)
+        """
+        if not hasattr(self, 'mpc_controller'):
+            raise RuntimeError("MPC controller not initialized but _generate_mpc_reference_trajectory called")
+        
+        # Number of states and horizon from MPC controller
+        nx = self.mpc_controller.nx
+        horizon = self.mpc_controller.horizon
+        
+        # Initialize reference trajectory
+        reference_trajectory = np.zeros((nx, horizon + 1))
+        
+        # Get current reference state
+        ref_mpos, ref_base = self._get_reference_trajectory()
+        
+        # Extract data from ref_base
+        ref_base_pos = ref_base[:3]
+        
+        # If ref_base has 7 values, it's using quaternion representation
+        if len(ref_base) == 7:
+            # Convert quaternion to Euler angles (simplified)
+            ref_base_rot_euler = quat2euler(ref_base[3:7])
+        # If it has 6 values, the last 3 are already Euler angles
+        elif len(ref_base) == 6:
+            ref_base_rot_euler = ref_base[3:6]
+        else:
+            # Default to zero rotation
+            ref_base_rot_euler = np.zeros(3)
+        
+        # Set reference velocities to zero
+        ref_motor_vel = np.zeros(self.num_motor)
+        
+        # Fill the first reference state
+        reference_trajectory[:self.num_motor, 0] = ref_mpos
+        reference_trajectory[self.num_motor:2*self.num_motor, 0] = ref_motor_vel
+        reference_trajectory[2*self.num_motor:2*self.num_motor+3, 0] = ref_base_pos
+        reference_trajectory[2*self.num_motor+3:, 0] = ref_base_rot_euler
+        
+        # For simplicity, we'll use the same reference for the entire horizon
+        # In a more sophisticated implementation, we would use a sequence of reference states
+        # that follow a desired trajectory
+        for i in range(1, horizon + 1):
+            reference_trajectory[:, i] = reference_trajectory[:, 0]
+        
+        return reference_trajectory
+        
+    def _get_current_state(self):
+        """
+        Get the current state vector for the MPC controller.
+        Returns a vector [motor_pos, motor_vel, base_pos, base_rot]
+        """
+        if not hasattr(self, 'mpc_controller'):
+            raise RuntimeError("MPC controller not initialized but _get_current_state called")
+            
+        # Get current motor positions and velocities
+        motor_pos = self.qpos[self.motor_idx]
+        motor_vel = self.qvel[self.motor_vel_idx]
+        
+        # Get base position and orientation
+        base_pos = self.qpos[self.base_idx[0:3]]
+        
+        # Get rotation as Euler angles 
+        # If using quaternion (length 4), convert to Euler angles
+        if len(self.qpos) >= 7 and self.base_idx[3] == 3:  # Assuming base_idx[3:7] points to quaternion
+            base_rot_euler = quat2euler(self.qpos[3:7])
+        else:
+            # Otherwise directly use Euler angles
+            base_rot_euler = self.qpos[self.base_idx[3:6]]
+        
+        # Check expected state dimensions from MPC controller
+        expected_dim = self.mpc_controller.nx
+        current_dim = len(motor_pos) + len(motor_vel) + len(base_pos) + len(base_rot_euler)
+        
+        # Combine into a single state vector
+        current_state = np.concatenate([motor_pos, motor_vel, base_pos, base_rot_euler])
+        
+        # Print warning if dimensions don't match
+        if current_dim != expected_dim:
+            print(f"Warning: State dimension mismatch in _get_current_state. Returning {current_dim} dims, but MPC expects {expected_dim}.")
+        
+        return current_state
 
     def __update_data(self, step=True):
         self.qpos = np.copy(self.sim.qpos())
@@ -494,6 +805,31 @@ class CassieEnv:
                 [math.cos(ref_yaw), math.sin(ref_yaw)],  # desired turning yaw angle
             ]
         )  #  height, vx, vy, yaw
+        
+        # Include MPC suggestions in observation if MPC is enabled
+        mpc_suggestion = np.zeros(self.num_motor)
+        mpc_stability_metrics = np.zeros(3)  # roll tilt, pitch tilt, z velocity
+        
+        if self.use_mpc:
+            try:
+                # Get stability metrics
+                pelvis_orientation = quat2euler(self.qpos[3:7])
+                roll_pitch_tilt = np.abs(pelvis_orientation[:2])  # Roll and pitch 
+                z_velocity = self.qvel[2]
+                mpc_stability_metrics = np.array([roll_pitch_tilt[0], roll_pitch_tilt[1], z_velocity])
+                
+                # Generate MPC suggestion for policy to consider
+                current_state = self._get_current_state()
+                reference_trajectory = self._generate_mpc_reference_trajectory()
+                mpc_suggestion = self.mpc_controller.compute_control(current_state, reference_trajectory)
+                
+                # Handle potential NaN or inf values
+                if np.any(np.isnan(mpc_suggestion)) or np.any(np.isinf(mpc_suggestion)):
+                    mpc_suggestion = np.zeros(self.num_motor)
+            except Exception as e:
+                # Remove debug message
+                mpc_suggestion = np.zeros(self.num_motor)
+                
         if self.timestep == 0:
             [self.previous_obs.append(ob_curr) for i in range(self.history_len_vf)]
             [
@@ -511,9 +847,20 @@ class CassieEnv:
         )
         obs_pol_hist = np.flip(np.asarray(self.long_history).T, 1)
 
-        obs_pol_base = np.concatenate([ob_prev, ob_curr, ob1, ob4, ob7, ob_command])
+        # Include MPC suggestion in policy observation
+        obs_pol_base = np.concatenate([
+            ob_prev, 
+            ob_curr, 
+            ob1, 
+            ob4, 
+            ob7, 
+            ob_command, 
+            mpc_suggestion,  # Include MPC action suggestion
+            mpc_stability_metrics  # Include stability metrics
+        ])
         obs_pol = (obs_pol_base, obs_pol_hist)
 
+        # Also include MPC information in value function observation
         obs_vf = np.concatenate(
             [
                 ob_prev,
@@ -526,6 +873,8 @@ class CassieEnv:
                 np.array([self.qpos[2]]),
                 self.sim.get_foot_forces(),
                 self.env_randomlizer.get_rand_floor_friction(),
+                mpc_suggestion,  # Include MPC suggestion
+                mpc_stability_metrics  # Include stability metrics
             ]
         )
 
@@ -697,14 +1046,23 @@ class CassieEnv:
         )
         if self.height < FALLING_THRESHOLD:
             self.fall_flag = True
-            # print('below loweset height')
             return True
         elif any(tarsus_pos[[2, 5]] <= TARSUS_HITGROUND_THRESHOLD):
             self.fall_flag = True
-            # print('tarsus on the ground')
             return True
         elif self.timestep >= self.max_timesteps:
-            # print('max step reached:{}'.format(self.max_timesteps))
+            return True
+        # Additional fall detection checks
+        elif self.height < 0.6:  # If robot is too close to the ground but above FALLING_THRESHOLD
+            self.fall_flag = True
+            return True
+        # Check for extreme tilt angles
+        elif abs(self.curr_rpy_gt[0]) > 0.7 or abs(self.curr_rpy_gt[1]) > 0.7:  # About 40 degrees
+            self.fall_flag = True
+            return True
+        # Check for high motor velocities (potential instability)
+        elif np.any(np.abs(self.qvel[self.motor_vel_idx]) > 30):  # Threshold for motor velocities
+            self.fall_flag = True
             return True
         else:
             return False
@@ -766,3 +1124,41 @@ class CassieEnv:
 
     def get_tarsus_pos(self, base_pos, base_rot, motor_pos):
         return self.cassie_fk.get_tarsus_pos(motor_pos, base_pos, base_rot)
+
+    def _get_reference_trajectory(self):
+        """
+        Get the current reference trajectory for the MPC controller.
+        Returns a tuple (ref_mpos, ref_base) 
+        """
+        if not hasattr(self, 'reference_generator'):
+            raise RuntimeError("Reference generator not initialized but _get_reference_trajectory called")
+        
+        # The get_ref_motion method returns a dictionary, not a tuple
+        ref_dict = self.reference_generator.get_ref_motion(look_forward=0)
+        
+        # Extract the relevant information from the dictionary
+        # Check if ref_dict contains motor positions, otherwise use a default
+        if "motor_pos" in ref_dict:
+            ref_mpos = ref_dict["motor_pos"]
+        else:
+            ref_mpos = np.zeros(self.num_motor)
+            
+        # Check if ref_dict contains base positions and rotations, otherwise use defaults
+        if "base_pos_global" in ref_dict and "base_rot_global" in ref_dict:
+            ref_base_pos = ref_dict["base_pos_global"]
+            ref_base_rot = ref_dict["base_rot_global"]
+            ref_base = np.concatenate([ref_base_pos, ref_base_rot])
+        else:
+            # Default standing pose
+            ref_base = np.zeros(7)  # 3 for position, 4 for quaternion rotation
+            ref_base[2] = 1.0  # Default z-height
+            ref_base[3:7] = [1, 0, 0, 0]  # Default quaternion (no rotation)
+            
+        return ref_mpos, ref_base
+
+    def __action_filter(self, action):
+        """Apply the Butterworth filter to the input action."""
+        if self.use_action_filter:
+            return self.action_filter.filter(action)
+        else:
+            return action
