@@ -1,3 +1,0 @@
-[submodule "external/baselines"]
-	path = external/baselines
-	url = https://github.com/openai/baselines.git

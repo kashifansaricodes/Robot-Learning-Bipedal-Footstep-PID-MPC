@@ -1,6 +1,8 @@
 import numpy as np
-from rlenv.gait_library import GaitLibrary
-from rlenv.cmd_generator import CmdGenerateor
+import math
+from transforms3d.euler import euler2quat as euler_to_quaternion
+from mujoco_env.gait_library import GaitLibrary
+from mujoco_env.cmd_generator import CmdGenerateor
 from configs.defaults import STANDING_POSE
 
 '''
@@ -12,7 +14,6 @@ The ReferenceGenerator composes the data from cmd_generator.py & gait_libraray.p
 and randomly set the robot to stand for a random timespan. 
 '''
 
-
 class ReferenceGenerator:
     def __init__(
         self,
@@ -20,11 +21,19 @@ class ReferenceGenerator:
         secs_per_env_step,
         config,
     ):
+        # print("Here")
         self.cmd_generator = CmdGenerateor(env_max_timesteps, secs_per_env_step, config)
         self.gait_library = GaitLibrary(secs_per_env_step)
         self.time_stand_transit_cooling = 3.0  # allow 3 sec to transit to standing
         self.norminal_standing = np.copy(STANDING_POSE)
         self.add_standing = config["add_standing"]
+
+        # Footstep trajectory additions
+        self.use_footstep_plan = config.get("use_footstep_plan", True)
+        self.footstep_traj = []
+        self.footstep_index = 0
+        self.dt = secs_per_env_step
+
         self.reset()
 
     def reset(self):
@@ -52,8 +61,23 @@ class ReferenceGenerator:
             self.init_standing_flag = False  # jump at the first time
             self.last_standing_flag = True
 
+        if self.use_footstep_plan:
+            plans = load_footstep_plans("../mujoco_env/footstep_plans.txt")
+            # print("Hereeeeee")
+            raw_steps = plans[0]
+            self.footstep_traj = interpolate_trajectory(raw_steps, dt=self.dt)
+            self.footstep_index = 0
+
     def update_ref_env(self, time_in_sec, base_xy_g, base_yaw):
         self.time_in_sec = time_in_sec
+
+        if self.use_footstep_plan and self.footstep_index < len(self.footstep_traj):
+            x, y, theta = self.footstep_traj[self.footstep_index]
+            self.last_ref_gaitparams = np.array([0.0, 0.0, 0.9])
+            self.last_ref_rotparams = np.array([0.0, 0.0, theta])
+            self.footstep_index += 1
+            return
+
         if (
             not self.start_standing
             and self.time_in_sec >= self.time_standing_start
@@ -77,13 +101,12 @@ class ReferenceGenerator:
         )
         if abs(self.last_ref_gaitparams[0] - ref_gaitparams[0]) >= 0.01:
             self.cmd_generator.set_ref_global_pos(xy=base_xy_g)
-        if abs(self.last_ref_rotparams[-1] - ref_rotparams[-1]) >= 0.002:  # 0.1 deg
+        if abs(self.last_ref_rotparams[-1] - ref_rotparams[-1]) >= 0.002:
             self.cmd_generator.set_ref_global_yaw(yaw=base_yaw)
         self.last_ref_gaitparams = ref_gaitparams
         self.last_ref_rotparams = ref_rotparams
 
     def get_init_pose(self):
-        # should reset ref env first then use this function
         init_gait_params = self.gait_library.get_random_init_gaitparams()
         ref_mpos = self.gait_library.get_ref_states(init_gait_params)
         ref_base_pos_from_cmd, _ = self.cmd_generator.get_ref_base_global()
@@ -118,12 +141,9 @@ class ReferenceGenerator:
 
     def get_ref_motion(self, look_forward=0):
         ref_dict = dict()
-        ref_gait_params = self.cmd_generator.curr_ref_gaitparams
-        ref_rot_params = self.cmd_generator.curr_ref_rotcmds
-        (
-            ref_base_pos_from_cmd,
-            ref_base_rot_from_cmd,
-        ) = self.cmd_generator.get_ref_base_global()
+        ref_gait_params = self.last_ref_gaitparams
+        ref_rot_params = self.last_ref_rotparams
+        ref_base_pos_from_cmd, ref_base_rot_from_cmd = self.cmd_generator.get_ref_base_global()
         ref_mpos = self.gait_library.get_ref_states(ref_gait_params, look_forward)
         ref_dict["base_pos_global"] = np.array(
             [*ref_base_pos_from_cmd, ref_gait_params[-1]]
@@ -131,26 +151,21 @@ class ReferenceGenerator:
         ref_dict["base_rot_global"] = ref_base_rot_from_cmd
         ref_dict["base_vel_local"] = np.array(
             [ref_gait_params[0], ref_gait_params[1], ref_rot_params[-1]]
-        )  # vx vy vyaw
+        )
         if self.start_standing:
             ref_dict["motor_pos"] = self.norminal_mpos
             ref_dict["motor_vel"] = np.zeros((10,))
         else:
             ref_dict["motor_pos"] = ref_mpos
-            ref_dict["motor_vel"] = np.zeros((10,))  # ref_mvel
+            ref_dict["motor_vel"] = np.zeros((10,))
         return ref_dict
 
     def get_curr_params(self):
-        ref_gait_params = self.cmd_generator.curr_ref_gaitparams
-        ref_rot_params = self.cmd_generator.curr_ref_rotcmds
-        return ref_gait_params, ref_rot_params
+        return self.last_ref_gaitparams, self.last_ref_rotparams
 
     @property
     def norminal_pose(self):
-        ref_base_pos = self.norminal_base_pos
-        ref_base_rot = self.norminal_base_rot
-        ref_mpos = self.norminal_mpos
-        return ref_base_pos, ref_base_rot, ref_mpos
+        return self.norminal_base_pos, self.norminal_base_rot, self.norminal_mpos
 
     @property
     def norminal_base_pos(self):
@@ -168,10 +183,39 @@ class ReferenceGenerator:
     def in_transit_to_stand(self):
         return (
             self.start_standing
-            and self.time_in_sec
-            <= self.time_standing_start + self.time_stand_transit_cooling
+            and self.time_in_sec <= self.time_standing_start + self.time_stand_transit_cooling
         )
 
     @property
     def in_stand_mode(self):
         return self.start_standing
+
+def load_footstep_plans(filepath):
+    with open(filepath, 'r') as f:
+        content = f.read()
+
+    plans = []
+    for block in content.strip().split('---'):
+        steps = []
+        for line in block.strip().splitlines():
+            if line:
+                x, y, theta = map(float, line.strip().split(','))
+                steps.append((x, y, theta))
+        if steps:
+            plans.append(steps)
+    return plans
+
+def interpolate_trajectory(footsteps, dt=0.02, step_duration=0.5):
+    ref_traj = []
+    for i in range(len(footsteps) - 1):
+        x0, y0, th0 = footsteps[i]
+        x1, y1, th1 = footsteps[i + 1]
+        steps = int(step_duration / dt)
+        for t in range(steps):
+            alpha = t / steps
+            x = (1 - alpha) * x0 + alpha * x1
+            y = (1 - alpha) * y0 + alpha * y1
+            theta = (1 - alpha) * th0 + alpha * th1
+            ref_traj.append((x, y, theta))
+    ref_traj.append(footsteps[-1])
+    return ref_traj

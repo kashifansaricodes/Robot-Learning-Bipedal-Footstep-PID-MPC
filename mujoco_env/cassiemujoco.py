@@ -12,7 +12,7 @@
 # ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-from rlenv.cassiemujoco_ctypes import *
+from mujoco_env.cassiemujoco_ctypes import *
 import ctypes
 import numpy as np
 from configs.defaults import ROOT_PATH

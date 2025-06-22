@@ -1,1 +1,0 @@
-python ../scripts/play.py  --test_model 'versatile_walking' 

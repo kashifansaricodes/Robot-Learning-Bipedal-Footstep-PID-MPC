@@ -1,9 +1,8 @@
-from rlenv.cassiemujoco import *
-from rlenv.cassiemujoco_ctypes import *
-from rlenv.reference_generator import ReferenceGenerator
-from rlenv.action_filter import ActionFilterButter
-from rlenv.env_randomlizer import EnvRandomlizer
-from rlenv.perturbation_generator import PerturbationGenerator
+from mujoco_env.cassiemujoco import *
+from mujoco_env.cassiemujoco_ctypes import *
+from mujoco_env.reference_generator import ReferenceGenerator
+from mujoco_env.action_filter import ActionFilterButter
+from mujoco_env.env_randomlizer import EnvRandomlizer
 from utility.cassie_fk import CassieFK
 from gym import spaces
 from configs.defaults import *
@@ -32,11 +31,8 @@ class CassieEnv:
         if config["is_visual"]:
             self.is_visual = True
             self.vis = CassieVis(self.sim, ROBOT_MODEL_FILE)
-            if config["cam_track_robot"]:
-                self.vis.set_cam("cassie-pelvis", 2.5, 90, 0)
         else:
             self.is_visual = False
-        self.step_zerotorque = config["step_zerotorque"]
         self.cassie_fk = CassieFK()
         # init variables
         self.qpos = np.copy(self.sim.qpos())
@@ -47,7 +43,7 @@ class CassieEnv:
         self.u = self._init_u()
         self.num_motor = 10
         self.sim_freq = 2000
-        self.appx_env_freq = 30  # 30 hz but the real control frequency is not exactly 30Hz because we round up the num_sims_per_env_step
+        self.appx_env_freq = 30  
         self.num_sims_per_env_step = self.sim_freq // self.appx_env_freq
         self.secs_per_env_step = self.num_sims_per_env_step / self.sim_freq
         self.real_env_freq = int(1 / self.secs_per_env_step)
@@ -58,7 +54,6 @@ class CassieEnv:
         self.observation_space_vf = None 
         self.observation_space_pol_cnn = None
         self.extrinsics_dim = None
-        # the low & high does not actually limit the actions output from MLP network, manually clip instead
         self.action_space = spaces.Box(low=-100, high=100, shape=(self.num_motor,))
         self.previous_obs = deque(maxlen=self.history_len_vf)
         self.previous_acs = deque(maxlen=self.history_len_vf)
@@ -77,23 +72,17 @@ class CassieEnv:
         # set reward
         self.__init_reward_func()
         self.__init_env_randomlizer()
-        self.__init_perturbation_generator()
         # init step
         self.__init_step_func()
         # reset and init others
         self.reset()
-        # self.sim.set_geom_name_pos('table', [0.6, 0.85, -0.265]) # 0.5 is the max
 
     ##########################################
     #            Init and Reset              #
     ##########################################
     def __set_env_type(self, config):
-        # NOTE: set true to use minimal rand range -> only rand floor friction
         self.minimal_rand = config["minimal_rand"]
-        # NOTE: set true to add noise on observation
         self.noisy = config["is_noisy"]  
-        # NOTE: set true to add external perturbation
-        self.perturbation = config["add_perturbation"]
 
     def __init_reward_func(self):
         self.reward_names = [
@@ -190,15 +179,10 @@ class CassieEnv:
             self.reward_scales[key] *= -1.0
 
     def __init_step_func(self):
-        if self.step_zerotorque:
-            self.__sim_step = self.__step_sim_zerotorque
-        else:
-            self.__sim_step = self.__step_sim_nominal
+        self.__sim_step = self.__step_sim_nominal
         self.__get_pTargets = self.acs_norm2actual
 
     def _init_u(self):
-        # p_paras = [400, 200, 200, 500, 20]
-        # d_paras = [4, 4, 10, 20, 4]
         # feed forward torque
         torque_fwd = [0, 0, 0, 0, 0]
         self.pd_uncertainty = np.ones((20,))
@@ -237,7 +221,6 @@ class CassieEnv:
         cassie_out = self.__set_cassie_out(ref_mpos, ref_base)
         self.obs_cassie_state = self.sim.estimate_state(cassie_out)
         self.__add_obs_noise()
-        # print("init obs_cassie_state:", np.array(self.obs_cassie_state.pelvis.translationalAcceleration).ravel())
 
     def __init_action_filter(self):
         self.action_filter = ActionFilterButter(
@@ -252,8 +235,6 @@ class CassieEnv:
         self.env_randomlizer = EnvRandomlizer(self.sim, self.sim_freq)
         self.__set_dynamics_properties()
 
-    def __init_perturbation_generator(self):
-        self.pertubration_generator = PerturbationGenerator(self.real_env_freq, 0.2)
 
     def __reset_action_filter(self):
         self.action_filter.reset()
@@ -267,7 +248,6 @@ class CassieEnv:
     def reset(self):
         self.__reset_env()
         self.action_filter.reset()
-        self.pertubration_generator.reset()
         self.env_randomlizer.randomize_dynamics()
         self.__set_dynamics_properties()
         self.__update_data(step=False)
@@ -319,7 +299,6 @@ class CassieEnv:
             )
             self.pd_uncertainty = self.env_randomlizer.get_pd_uncertainty()
             self._update_pd()
-            # self.sim.set_geom_quat(self.env_randomlizer.get_floor_slope(), 'floor')
 
     def __set_obs_space(self, obs_vf, obs_pol):
         self.observation_space_vf = spaces.Box(
@@ -363,8 +342,6 @@ class CassieEnv:
         actual_pTs = self.__get_pTargets(acs)
         actual_pTs_filtered = self.action_filter.filter(actual_pTs)
 
-        if self.perturbation:
-            self.__apply_perturbation()
         # simulated env
         self.__sim_step(actual_pTs_filtered)
         if self.noisy:
@@ -437,20 +414,6 @@ class CassieEnv:
         cassie_out.rightLeg.kneeDrive.position = mpos[8]
         cassie_out.rightLeg.footDrive.position = mpos[9]
         return cassie_out
-
-    def __apply_perturbation(self):
-        (
-            force_to_apply,
-            apply_force_flag,
-        ) = self.pertubration_generator.apply_perturbation()
-        if apply_force_flag:
-            self.applied_force = force_to_apply
-            self.sim.apply_force(self.applied_force)
-            if self.is_visual:
-                print("Applied Perturbation: ", self.applied_force)
-        else:
-            self.applied_force *= 0.0
-            self.sim.clear_forces()
 
     ##########################################
     #              Observation               #
@@ -565,36 +528,19 @@ class CassieEnv:
             self.reward_scales["meter_velx"]
             * abs(self.ref_dict["base_vel_local"][0] - velocity_local[0])
         )
-        # print(
-        #     "ptrans_velx reward: {:.6f}, desired: {:.3f}, actual: {:.3f}".format(
-        #         r_ptrans_velx, self.ref_dict["base_vel_local"][0], velocity_local[0]
-        #     ),
-        #     end="\r",
-        # )
+        
 
         r_ptrans_vely = np.exp(
             self.reward_scales["meter_vely"]
             * abs(self.ref_dict["base_vel_local"][1] - velocity_local[1])
         )
-        # print(
-        #     "ptrans_vely reward: {:.6f}, desired: {:.3f}, actual: {:.3f}".format(
-        #         r_ptrans_vely, self.ref_dict["base_vel_local"][1], velocity_local[1]
-        #     ),
-        #     end="\r",
-        # )
+
 
         base_angle_err = np.sum(
             1.0 - np.cos(self.ref_dict["base_rot_global"] - self.curr_rpy_gt)
         )
         r_prot = np.exp(self.reward_scales["prot"] * base_angle_err)
-        # print(
-        #     "prot reward:{:.6f}, desired: {:.4f}, actual: {:.4f}".format(
-        #         r_prot,
-        #         np.rad2deg(self.ref_dict["base_rot_global"][-1]),
-        #         np.rad2deg(self.curr_rpy_gt[-1]),
-        #     ),
-        #     end="\r",
-        # )
+
 
         base_anglevel_err = np.sum(
             np.square(

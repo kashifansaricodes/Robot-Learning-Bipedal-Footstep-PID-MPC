@@ -4,7 +4,7 @@ import tensorflow as tf
 
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 from ppo.policies import MLPCNNPolicy
-from rlenv.cassie_env import CassieEnv
+from mujoco_env.cassie_env import CassieEnv
 from configs.defaults import ROOT_PATH
 from baselines import logger
 from mpi4py import MPI
@@ -71,6 +71,7 @@ restore_cont = args.restore_cont
 rnd_seed = args.rnd_seed 
 # max iteration for training 
 max_iters = args.max_iters
+print(max_iters)
 # how frequent the ckpt will be saved
 save_interval = args.save_interval
 
@@ -86,7 +87,7 @@ os.environ["OPENAI_LOGDIR"] = ROOT_PATH + "/logs/" + saved_model
 print("[Train]: MODEL_TO_SAVE", saved_model)
 
 
-def train(max_iters, with_gpu=False, callback=None):
+def train(max_iters, with_gpu=True, callback=None):
     # training define
     if not with_gpu:
         config = tf.ConfigProto(device_count={"GPU": 0})

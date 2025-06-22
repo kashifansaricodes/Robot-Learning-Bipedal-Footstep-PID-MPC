@@ -21,7 +21,10 @@ def euler2quat(rxryrz):
             - np.sin(rx / 2) * np.sin(ry / 2) * np.cos(rz / 2),
         ]
     )
+    # print("Converted quat:", q.flatten())
     return q.ravel()
+    # return q.flatten()
+
 
 
 def quat2euler(q):

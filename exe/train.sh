@@ -1,5 +1,5 @@
-mpirun -np 1 python ../scripts/train.py  --train_name 'new_training' \
-                                        --rnd_seed 1 \
-                                        --max_iters 6000 \
-                                        --save_interval 100 \
-                                        #--restore_from 'previous_ckpts'
+mpirun -np 8 python ../scripts/train.py \
+    --train_name 'footstep_training' \
+    --rnd_seed 1 \
+    --max_iters 600 \
+    --save_interval 100 \

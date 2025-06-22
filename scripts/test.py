@@ -1,9 +1,10 @@
 from baselines.common import tf_util as U
 import tensorflow as tf
-from rlenv.cassie_env import CassieEnv
+from mujoco_env.cassie_env import CassieEnv
 import ppo.policies as policies
 from configs.env_config import config_play
 from configs.defaults import ROOT_PATH
+import mujoco_env
 
 # to ignore specific deprecation warnings
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
@@ -26,6 +27,7 @@ def get_args():
 
 
 args = get_args()
+print(mujoco_env.__file__)
 # model name to test
 test_model = args.test_model
 test_episode_len = args.test_episode_len
