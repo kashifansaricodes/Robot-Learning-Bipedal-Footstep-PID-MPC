@@ -51,6 +51,8 @@ pip install hydra-core>=1.1.0          # Configuration management
 pip install torch==1.7.1+cu101 torchvision==0.8.2+cu101 -f https://download.pytorch.org/whl/torch_stable.html
 ```
 
+
+
 ### Additional Environment Configuration
 > **📖 Base environment variables**: Refer to the [Main Branch README](https://github.com/kashifansaricodes/Robot-Learning-Bipedal-Footstep-PID-MPC) for MUJOCO_PY_MUJOCO_PATH and LD_LIBRARY_PATH setup.
 
@@ -119,6 +121,10 @@ This stage:
 - Trains RL agent to adapt MPC parameters
 - Learns optimal mode switching strategies
 - Develops robust performance under uncertainties
+
+<img width="2707" height="1250" alt="Screenshot from 2025-09-28 12-13-38" src="https://github.com/user-attachments/assets/c57809f4-181e-42f3-8412-f687875b9def" />
+
+
 
 #### Stage 3: Integrate and Fine-tune Full System
 ```bash
