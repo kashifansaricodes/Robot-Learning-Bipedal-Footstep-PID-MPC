@@ -2,6 +2,10 @@
 
 A comprehensive repository implementing advanced control strategies for bipedal robot locomotion using the Cassie robot in MuJoCo simulation. This project explores multiple control paradigms including reinforcement learning, model predictive control (MPC), and hybrid approaches for achieving stable and dynamic walking.
 
+<img width="1919" height="1451" alt="Screenshot from 2025-09-28 10-23-23" src="https://github.com/user-attachments/assets/55575bbb-00df-41e7-bc1e-9bbcae79f7fc" />
+
+
+
 ## 🎯 Project Overview
 
 This repository demonstrates the integration of classical control theory and modern machine learning for bipedal robot walking. The project implements multiple control approaches using the Agility Robotics Cassie bipedal robot in MuJoCo simulation environment, focusing on:
