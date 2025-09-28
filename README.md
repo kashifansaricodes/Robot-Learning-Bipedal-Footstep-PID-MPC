@@ -4,6 +4,9 @@
 
 This branch implements **pure reinforcement learning** for bipedal locomotion, focusing on end-to-end learning without explicit model-based control. The approach uses PPO (Proximal Policy Optimization) to learn walking policies directly from simulation experience.
 
+
+<img width="1744" height="1044" alt="Screenshot from 2025-09-28 12-16-46" src="https://github.com/user-attachments/assets/90896fcf-3184-426f-8b08-b9a79e7c0188" />
+
 ## 🤖 Branch-Specific Technical Details
 
 ### Algorithm: Proximal Policy Optimization (PPO)
