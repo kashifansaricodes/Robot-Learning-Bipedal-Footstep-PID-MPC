@@ -15,6 +15,11 @@ This repository demonstrates the integration of classical control theory and mod
 - **Hybrid MPC+RL**: Combining the strengths of both approaches
 - **PID Control**: Low-level joint tracking and stability
 
+[![YouTube](https://img.shields.io/badge/Watch%20on-YouTube-red?logo=youtube&logoColor=white)](https://youtu.be/aSiA5A0hoFw?si=LHS0tIE0hHCNx9JK)
+
+[![Watch the video](https://img.youtube.com/vi/aSiA5A0hoFw/0.jpg)](https://youtu.be/aSiA5A0hoFw?si=LHS0tIE0hHCNx9JK)
+
+
 ## 🌳 Repository Structure
 
 This repository contains **three specialized branches**, each focusing on different aspects of bipedal locomotion control:
